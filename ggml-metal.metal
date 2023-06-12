@@ -18,6 +18,11 @@ typedef struct {
     uint8_t qs[QK4_1 / 2];  // nibbles / quants
 } block_q4_1;
 
+struct Buffer {
+    device uint8_t *contents;
+    uint64_t length;
+};
+
 static void dequantize_row_q4_0(device const block_q4_0 * x, device float * y, int k) {
     const int qk = QK4_0;
 
@@ -59,53 +64,87 @@ static void dequantize_row_q4_1(device const block_q4_1 * x, device float * y, i
     }
 }
 
+template<typename T>
+T get_buffer(device Buffer * buffers, constant uint64_t & offset) {
+    uint64_t mutable_offset = offset;
+    device Buffer * curr = buffers;
+    while (curr->length < mutable_offset) {
+        mutable_offset -= curr->length;
+        curr = &curr[1];
+    }
+    return ((T)(&curr[0].contents[mutable_offset]));
+}
+
+#define BUFFER_ARRAY(name) \
+    device Buffer * name##_buffers, \
+    constant uint64_t & name##_offset
+
+#define GET_BUFFER(name, type) \
+    type name = get_buffer<type>(name##_buffers, name##_offset)
+
 kernel void kernel_add(
-        device const float * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         uint tpig[[thread_position_in_grid]]) {
+
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
     dst[tpig] = src0[tpig] + src1[tpig];
 }
 
 kernel void kernel_mul(
-        device const float * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
     dst[tpig] = src0[tpig] * src1[tpig];
 }
 
 // assumption: src1 is a row
 // broadcast src1 into src0
 kernel void kernel_mul_row(
-        device const float * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
     dst[tpig] = src0[tpig] * src1[tpig % ne00];
 }
 
 kernel void kernel_scale(
-        device const float * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant     float & scale,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     dst[tpig] = src0[tpig] * scale;
 }
 
 kernel void kernel_silu(
-        device const float * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     float x = src0[tpig];
     dst[tpig] = x / (1.0f + exp(-x));
 }
 
 kernel void kernel_relu(
-        device const float * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     dst[tpig] = max(0.0f, src0[tpig]);
 }
 
@@ -113,16 +152,18 @@ constant float GELU_COEF_A    = 0.044715f;
 constant float SQRT_2_OVER_PI = 0.79788456080286535587989211986876f;
 
 kernel void kernel_gelu(
-    device const float * src0,
-    device       float * dst,
+    BUFFER_ARRAY(src0),
+    BUFFER_ARRAY(dst),
     uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     float x = src0[tpig];
     dst[tpig] = 0.5f*x*(1.0f + tanh(SQRT_2_OVER_PI*x*(1.0f + GELU_COEF_A*x*x)));
 }
 
 kernel void kernel_soft_max(
-        device const float * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne01,
         constant   int64_t & ne02,
@@ -130,6 +171,8 @@ kernel void kernel_soft_max(
         uint3 tgpig[[threadgroup_position_in_grid]],
         uint3 tpitg[[thread_position_in_threadgroup]],
         uint3   ntg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     const int64_t i03 = tgpig[2];
     const int64_t i02 = tgpig[1];
     const int64_t i01 = tgpig[0];
@@ -191,12 +234,14 @@ kernel void kernel_soft_max(
 }
 
 kernel void kernel_diag_mask_inf(
-        device const float * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne01,
         constant       int & n_past,
         uint3 tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     const int64_t i02 = tpig[2];
     const int64_t i01 = tpig[1];
     const int64_t i00 = tpig[0];
@@ -209,13 +254,16 @@ kernel void kernel_diag_mask_inf(
 }
 
 kernel void kernel_get_rows_f16(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -225,13 +273,16 @@ kernel void kernel_get_rows_f16(
 }
 
 kernel void kernel_get_rows_q4_0(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -241,13 +292,16 @@ kernel void kernel_get_rows_q4_0(
 }
 
 kernel void kernel_get_rows_q4_1(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -257,8 +311,8 @@ kernel void kernel_get_rows_q4_1(
 }
 
 kernel void kernel_rms_norm(
-        device const  void * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant     float & eps,
@@ -266,6 +320,9 @@ kernel void kernel_rms_norm(
         uint tgpig[[threadgroup_position_in_grid]],
         uint tpitg[[thread_position_in_threadgroup]],
         uint   ntg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(dst,  device float *);
+
     device const float * x = (device const float *) ((device const char *) src0 + tgpig*nb01);
 
     // parallel sum
@@ -300,9 +357,9 @@ kernel void kernel_rms_norm(
 }
 
 kernel void kernel_mul_mat_q4_0_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -310,6 +367,9 @@ kernel void kernel_mul_mat_q4_0_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
     const int nb = ne00/QK4_0;
 
     const int64_t r0 = tgpig.x;
@@ -368,9 +428,9 @@ kernel void kernel_mul_mat_q4_0_f32(
 }
 
 kernel void kernel_mul_mat_q4_1_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -378,6 +438,9 @@ kernel void kernel_mul_mat_q4_1_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
     const int nb = ne00/QK4_1;
 
     const int64_t r0 = tgpig.x;
@@ -437,9 +500,9 @@ kernel void kernel_mul_mat_q4_1_f32(
 }
 
 kernel void kernel_mul_mat_f16_f32(
-        device const  char * src0,
-        device const  char * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne01,
         constant  uint64_t & nb00,
@@ -457,6 +520,10 @@ kernel void kernel_mul_mat_f16_f32(
         uint3  tpig[[thread_position_in_grid]],
         uint3 tpitg[[thread_position_in_threadgroup]],
         uint3  tptg[[threads_per_threadgroup]]) {
+
+    GET_BUFFER(src0, device const char *);
+    GET_BUFFER(src1, device const char *);
+    GET_BUFFER(dst,  device float *);
 
     const int64_t r0 = tgpig.x;
     const int64_t r1 = tgpig.y;
@@ -486,8 +553,8 @@ kernel void kernel_mul_mat_f16_f32(
 }
 
 kernel void kernel_rope(
-        device const  void * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne01,
         constant   int64_t & ne02,
@@ -508,6 +575,8 @@ kernel void kernel_rope(
         constant       int & n_dims,
         constant       int & mode,
         uint3 tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(dst,  device float *);
     const int64_t i3 = tpig[2];
     const int64_t i2 = tpig[1];
     const int64_t i1 = tpig[0];
@@ -541,8 +610,8 @@ kernel void kernel_rope(
 }
 
 kernel void kernel_cpy_f32_f16(
-        device const float * src0,
-        device        half * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne01,
         constant   int64_t & ne02,
@@ -562,6 +631,8 @@ kernel void kernel_cpy_f32_f16(
         uint3 tgpig[[threadgroup_position_in_grid]],
         uint3 tpitg[[thread_position_in_threadgroup]],
         uint3   ntg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device half *);
     const int64_t i03 = tgpig[2];
     const int64_t i02 = tgpig[1];
     const int64_t i01 = tgpig[0];
@@ -583,8 +654,8 @@ kernel void kernel_cpy_f32_f16(
 }
 
 kernel void kernel_cpy_f32_f32(
-        device const float * src0,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne01,
         constant   int64_t & ne02,
@@ -604,6 +675,8 @@ kernel void kernel_cpy_f32_f32(
         uint3 tgpig[[threadgroup_position_in_grid]],
         uint3 tpitg[[thread_position_in_threadgroup]],
         uint3   ntg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const float *);
+    GET_BUFFER(dst,  device float *);
     const int64_t i03 = tgpig[2];
     const int64_t i02 = tgpig[1];
     const int64_t i01 = tgpig[0];
@@ -860,13 +933,16 @@ static void dequantize_row_q6_k(device const block_q6_k * x, device float * y, i
 }
 
 kernel void kernel_get_rows_q2_k(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -876,13 +952,16 @@ kernel void kernel_get_rows_q2_k(
 }
 
 kernel void kernel_get_rows_q3_k(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -892,13 +971,16 @@ kernel void kernel_get_rows_q3_k(
 }
 
 kernel void kernel_get_rows_q4_k(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -908,13 +990,16 @@ kernel void kernel_get_rows_q4_k(
 }
 
 kernel void kernel_get_rows_q5_k(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -924,13 +1009,16 @@ kernel void kernel_get_rows_q5_k(
 }
 
 kernel void kernel_get_rows_q6_k(
-        device const  void * src0,
-        device const   int * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant  uint64_t & nb01,
         constant  uint64_t & nb1,
         uint tpig[[thread_position_in_grid]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const int *);
+    GET_BUFFER(dst,  device float *);
     const int i = tpig;
     const int r = ((device int32_t *) src1)[i];
 
@@ -942,9 +1030,9 @@ kernel void kernel_get_rows_q6_k(
 //====================================== dot products =========================
 
 kernel void kernel_mul_mat_q2_k_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -952,6 +1040,9 @@ kernel void kernel_mul_mat_q2_k_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
 
     const int nb = ne00/QK_K;
 
@@ -1042,9 +1133,9 @@ kernel void kernel_mul_mat_q2_k_f32(
 }
 
 kernel void kernel_mul_mat_q3_k_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -1053,6 +1144,10 @@ kernel void kernel_mul_mat_q3_k_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
 
     const uint16_t kmask1 = 0x0303;
     const uint16_t kmask2 = 0x0f0f;
@@ -1145,9 +1240,9 @@ kernel void kernel_mul_mat_q3_k_f32(
 }
 
 kernel void kernel_mul_mat_q4_k_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -1155,6 +1250,10 @@ kernel void kernel_mul_mat_q4_k_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
 
     const uint16_t kmask1 = 0x3f3f;
     const uint16_t kmask2 = 0x0f0f;
@@ -1253,9 +1352,9 @@ kernel void kernel_mul_mat_q4_k_f32(
 }
 
 kernel void kernel_mul_mat_q5_k_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -1263,6 +1362,10 @@ kernel void kernel_mul_mat_q5_k_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
 
     const uint16_t kmask1 = 0x3f3f;
     const uint16_t kmask2 = 0x0f0f;
@@ -1352,9 +1455,9 @@ kernel void kernel_mul_mat_q5_k_f32(
 }
 
 kernel void kernel_mul_mat_q6_k_f32(
-        device const  void * src0,
-        device const float * src1,
-        device       float * dst,
+        BUFFER_ARRAY(src0),
+        BUFFER_ARRAY(src1),
+        BUFFER_ARRAY(dst),
         constant   int64_t & ne00,
         constant   int64_t & ne10,
         constant   int64_t & ne0,
@@ -1362,6 +1465,10 @@ kernel void kernel_mul_mat_q6_k_f32(
         uint2 tgpig[[threadgroup_position_in_grid]],
         uint2 tpitg[[thread_position_in_threadgroup]],
         uint2  tptg[[threads_per_threadgroup]]) {
+
+    GET_BUFFER(src0, device const void *);
+    GET_BUFFER(src1, device const float *);
+    GET_BUFFER(dst,  device float *);
 
     const uint8_t kmask1 = 0x03;
     const uint8_t kmask2 = 0x0C;
